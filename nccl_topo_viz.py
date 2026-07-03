@@ -726,7 +726,7 @@ def generate_trees_dot(parser, output_path):
     """Generate Graphviz DOT for all distinct trees, arranged horizontally."""
     lines = []
     lines.append('digraph trees {')
-    lines.append('  graph [fontname="Helvetica", fontsize=14, labelloc="t"];')
+    lines.append('  graph [fontname="Helvetica", fontsize=14, labelloc="t", rankdir=BT];')
     lines.append(f'  label="Tree Topology - {parser.num_ranks} ranks";')
     lines.append('  node [fontname="Helvetica", fontsize=9, style=filled];')
     lines.append('  edge [fontname="Helvetica", fontsize=8];')
@@ -740,7 +740,6 @@ def generate_trees_dot(parser, output_path):
         lines.append(f'  subgraph {cluster_name} {{')
         lines.append(f'    label="{group_name}";')
         lines.append('    style=dashed;')
-        lines.append('    rankdir=TB;')
         lines.append("")
 
         # Collect all ranks in this tree
