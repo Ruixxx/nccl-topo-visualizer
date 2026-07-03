@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Generated diagram files
+*.dot
+*.png
+*.svg
+*.pdf
+
+# NCCL test logs (may contain internal IPs, hostnames, PIDs)
+*.log
+*.txt
+
+# OS
+.DS_Store
+Thumbs.db
