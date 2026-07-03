@@ -17,6 +17,24 @@ Given an NCCL-TEST log (single-node or multi-node), this tool produces three kin
 - Python 3.8+
 - Graphviz (`dot` binary) — install with `apt install graphviz` or `brew install graphviz`
 
+## Generating NCCL-TEST Logs
+
+This tool relies on the topology dump that NCCL prints at `INFO` level during communicator initialization. When running NCCL-TEST, set these environment variables to capture the required output:
+
+```bash
+NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,GRAPH ./build/all_reduce_perf -b 8 -e 8 -g 8
+```
+
+- `NCCL_DEBUG=INFO` — enables INFO-level logging, which includes the `=== System ===` topology tree, `Ring`, `Trees`, and `Channel ... via` lines.
+- `NCCL_DEBUG_SUBSYS=INIT,GRAPH` — restricts output to the INIT and GRAPH subsystems, keeping the log concise while still containing everything this tool needs.
+
+Redirect stdout/stderr to a file, then pass it to the visualizer:
+
+```bash
+NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,GRAPH mpirun -np 8 ./all_reduce_perf -b 8 -e 8 -g 8 2>&1 | tee nccl_log.txt
+python3 nccl_topo_viz.py nccl_log.txt
+```
+
 ## Usage
 
 ```bash
