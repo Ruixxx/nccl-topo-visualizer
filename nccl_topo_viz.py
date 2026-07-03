@@ -496,12 +496,39 @@ def _rank_color(rank_info, hostnames):
     return colors[idx]
 
 
-def _conn_label(conn):
+def _parse_rdma_info(via):
+    """Extract RDMA device ID and GDRDMA flag from a 'via' string.
+
+    Examples:
+        NET/IB/0/GDRDMA       -> ('0', True)
+        NET/IB/0(0)/GDRDMA    -> ('0', True)
+        P2P/CUMEM             -> (None, False)
+    """
+    import re
+    m = re.match(r'NET/IB/(\d+)(?:\(\d+\))?/(GDRDMA)?', via)
+    if m:
+        return m.group(1), m.group(2) is not None
+    return None, False
+
+
+def _conn_label(conn, parser=None):
     """Generate edge label for a connection."""
     if 'P2P' in conn.via:
         return 'P2P'
     elif 'NET' in conn.via or 'IB' in conn.via or 'GDRDMA' in conn.via:
-        return 'RDMA\\n(GPUDirect)'
+        dev_id, gdrdma = _parse_rdma_info(conn.via)
+        parts = ['RDMA']
+        if parser:
+            src_host = parser.ranks[conn.src_rank].hostname
+            nic = parser.nic_info.get(src_host, 'mlx5_0')
+            if ':' in nic:
+                nic = nic.split(':')[0]
+            parts.append(nic)
+        if dev_id is not None:
+            parts.append(f'IB/{dev_id}')
+        if gdrdma:
+            parts.append('GDRDMA')
+        return '\\n'.join(parts)
     return conn.via
 
 
@@ -682,12 +709,8 @@ def generate_rings_dot(parser, output_path):
             node_name_dst = f'r{ring_id:02d}_{dst_rank}'
 
             if conn:
-                label = _conn_label(conn)
+                label = _conn_label(conn, parser)
                 color = _conn_color(conn)
-                if 'P2P' in conn.via:
-                    label = 'P2P'
-                else:
-                    label = 'RDMA'
             else:
                 # Same node → P2P, different node → RDMA
                 if ri_src.hostname == ri_dst.hostname:
@@ -774,12 +797,8 @@ def generate_trees_dot(parser, output_path):
             conn = parser.connections.get((parent, child))
 
             if conn:
-                if 'P2P' in conn.via:
-                    label = 'P2P'
-                    color = '#2ca02c'
-                else:
-                    label = 'RDMA'
-                    color = '#d62728'
+                label = _conn_label(conn, parser)
+                color = _conn_color(conn)
             else:
                 if ri_parent.hostname == ri_child.hostname:
                     label = 'P2P'
