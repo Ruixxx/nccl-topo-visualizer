@@ -429,34 +429,31 @@ class NCCLLogParser:
         if not self.trees_combined:
             return []
 
-        # For each channel, build tree 0 and tree 1 structures
-        # tree 0: edges from up[0] (parent->rank) and down[0] (rank->child)
-        # tree 1: edges from up[1] (parent->rank) and derived children
+        # For each channel, build tree 0 and tree 1 structures.
+        # NCCL Trees format: up0/up1/up2->self->down0/down1/down2
+        # up = parent, down = child.
+        # Tree 0 is the reduce tree: data flows child->parent (leaf->root).
+        # Tree 1 is the broadcast tree: data flows parent->child (root->leaf).
+        # Edges are drawn in data flow direction.
 
         channel_groups = {}  # key: (tree0_sig, tree1_sig) -> list of channels
 
         for channel in sorted(self.trees_combined.keys()):
             entries = self.trees_combined[channel]
 
-            # Build tree 0 edges
             tree0_edges = set()
             tree1_edges = set()
 
             for entry in entries:
                 rank = entry.rank
-                # Tree 0
+                # Tree 0 (reduce): data flows child -> parent, so arrows point self -> up
                 if entry.up[0] != -1:
-                    tree0_edges.add((entry.up[0], rank))
+                    tree0_edges.add((rank, entry.up[0]))
                 if entry.down[0] != -1:
-                    tree0_edges.add((rank, entry.down[0]))
-                # Tree 1
+                    tree0_edges.add((entry.down[0], rank))
+                # Tree 1 (broadcast): data flows parent -> child, so arrows point up -> self
                 if entry.up[1] != -1:
                     tree1_edges.add((entry.up[1], rank))
-
-            # Derive tree 1 children from up[1] values
-            for entry in entries:
-                if entry.up[1] != -1:
-                    tree1_edges.add((entry.up[1], entry.rank))
 
             # Create signature for grouping
             tree0_sig = frozenset(tree0_edges)
@@ -756,11 +753,11 @@ def generate_trees_dot(parser, output_path):
             color = _rank_color(ri, hostnames)
             label = _rank_label(ri)
             node_name = f't{idx}_{rank}'
-            # Mark root nodes
+            # Mark root nodes (reduce target: no outgoing edge)
             roots = set()
             for r in tree_ranks:
-                has_parent = any(c == r for p, c in edges if p != -1)
-                if not has_parent:
+                has_child = any(p == r for p, c in edges)
+                if not has_child:
                     roots.add(r)
             shape = 'box3d' if rank in roots else 'box'
             lines.append(f'    {node_name} [label="{label}", fillcolor="{color}", shape={shape}];')
