@@ -58,12 +58,18 @@ class RingSegment:
 
 @dataclass
 class TreeEntry:
-    """A tree entry from Trees [N] line for one rank, one channel."""
+    """A tree entry from Trees [N] line for one rank, one channel.
+
+    Mirrors NCCL struct ncclTree { int up; int down[NCCL_MAX_TREE_ARITY]; }.
+    The Trees [N] log format is: down0/down1/down2->self->up
+    - up: single parent rank (-1 if root)
+    - down: [down0, down1, down2] child ranks (-1 if none)
+    """
     channel: int
     rank: int
-    up: list       # [up0, up1, up2] parent ranks for trees 0, 1, 2
+    up: int          # parent rank (-1 if root)
     self_rank: int
-    down: list     # [down0, down1, down2] child ranks (may be truncated)
+    down: list       # [down0, down1, down2] child ranks (-1 if none)
 
 
 @dataclass
@@ -303,7 +309,7 @@ class NCCLLogParser:
                 channel = int(ch_str)
                 parsed = self._parse_tree_value(val)
                 if parsed:
-                    up, self_val, down = parsed
+                    down, self_val, up = parsed
                     self.trees_combined[channel].append(TreeEntry(
                         channel=channel,
                         rank=global_rank,
@@ -314,25 +320,26 @@ class NCCLLogParser:
 
     @staticmethod
     def _parse_tree_value(val):
-        """Parse 'up0/up1/up2->self->down0/down1/down2' (down may be truncated)."""
+        """Parse 'down0/down1/down2->self->up' (NCCL Trees format).
+
+        Mirrors NCCL struct ncclTree { int up; int down[3]; }.
+        The Trees [N] log prints: down[0]/down[1]/down[2]->rank->up
+        """
         parts = val.split('->')
         if len(parts) != 3:
             return None
 
-        up_str = parts[0].strip()
-        self_str = parts[1].strip()
-        down_str = parts[2].strip()
+        down_str = parts[0].strip()   # down0/down1/down2
+        self_str = parts[1].strip()    # self (rank)
+        up_str = parts[2].strip()      # up (single parent rank)
 
-        up = [int(x) for x in up_str.split('/')]
-        while len(up) < 3:
-            up.append(-1)
-
-        down_parts = down_str.split('/')
-        down = [int(x) for x in down_parts]
+        down = [int(x) for x in down_str.split('/')]
         while len(down) < 3:
             down.append(-1)
 
-        return (up, int(self_str), down)
+        up = int(up_str)
+
+        return (down, int(self_str), up)
 
     # ── Connection parsing ────────────────────────────────────────────────
 
@@ -422,61 +429,32 @@ class NCCLLogParser:
         return sorted(self.rings.keys())
 
     def get_tree_groups(self):
-        """Group channels by their tree structure and return distinct tree configurations.
+        """Return one tree per channel: (tree_name, edges).
 
-        Returns a list of (group_name, tree_index, edges) where edges is a list of (parent, child, rank).
+        NCCL Trees format per channel slot: down0/down1/down2->self->up
+        - up: parent rank (-1 if root)
+        - down[0..2]: child ranks (-1 if none)
+
+        Each channel N maps to "Tree N". With nChannels=2, the four slots
+        [0][1][2][3] map to Tree 0/1/2/3: Tree 0/1 are the first double-tree's
+        two channel copies, Tree 2/3 are the second's. They may be topologically
+        identical; we draw all of them as the log shows, without dedup.
+
+        Edges flow parent -> child: (up, self) and (self, down[i]).
         """
-        if not self.trees_combined:
-            return []
-
-        # For each channel, build tree 0 and tree 1 structures.
-        # NCCL Trees format: up0/up1/up2->self->down0/down1/down2
-        # up = parent, down = child.
-        # Tree 0 is the reduce tree: data flows child->parent (leaf->root).
-        # Tree 1 is the broadcast tree: data flows parent->child (root->leaf).
-        # Edges are drawn in data flow direction.
-
-        channel_groups = {}  # key: (tree0_sig, tree1_sig) -> list of channels
-
+        result = []
         for channel in sorted(self.trees_combined.keys()):
             entries = self.trees_combined[channel]
-
-            tree0_edges = set()
-            tree1_edges = set()
-
+            edges = set()
             for entry in entries:
                 rank = entry.rank
-                # Tree 0 (reduce): data flows child -> parent, so arrows point self -> up
-                if entry.up[0] != -1:
-                    tree0_edges.add((rank, entry.up[0]))
-                if entry.down[0] != -1:
-                    tree0_edges.add((entry.down[0], rank))
-                # Tree 1 (broadcast): data flows parent -> child, so arrows point up -> self
-                if entry.up[1] != -1:
-                    tree1_edges.add((entry.up[1], rank))
-
-            # Create signature for grouping
-            tree0_sig = frozenset(tree0_edges)
-            tree1_sig = frozenset(tree1_edges)
-            key = (tree0_sig, tree1_sig)
-
-            if key not in channel_groups:
-                channel_groups[key] = {
-                    'channels': [],
-                    'tree0_edges': tree0_edges,
-                    'tree1_edges': tree1_edges,
-                }
-            channel_groups[key]['channels'].append(channel)
-
-        result = []
-        for key, data in channel_groups.items():
-            channels = data['channels']
-            ch_str = f"Ch{channels[0]}" if len(channels) == 1 else f"Ch{channels[0]}-{channels[-1]}"
-            if data['tree0_edges']:
-                result.append((f"{ch_str} Tree0", data['tree0_edges']))
-            if data['tree1_edges']:
-                result.append((f"{ch_str} Tree1", data['tree1_edges']))
-
+                if entry.up != -1:
+                    edges.add((entry.up, rank))
+                for d in entry.down:
+                    if d != -1:
+                        edges.add((rank, d))
+            if edges:
+                result.append((f"Tree {channel}", edges))
         return result
 
 
@@ -768,6 +746,10 @@ def generate_trees_dot(parser, output_path):
             tree_ranks.add(parent)
             tree_ranks.add(child)
 
+        # Root: node with no parent (no incoming edge), i.e. up == -1
+        parents = {child for parent, child in edges}
+        roots = {r for r in tree_ranks if r not in parents}
+
         # Create nodes
         for rank in sorted(tree_ranks):
             ri = parser.ranks.get(rank)
@@ -776,12 +758,6 @@ def generate_trees_dot(parser, output_path):
             color = _rank_color(ri, hostnames)
             label = _rank_label(ri)
             node_name = f't{idx}_{rank}'
-            # Mark root nodes (reduce target: no outgoing edge)
-            roots = set()
-            for r in tree_ranks:
-                has_child = any(p == r for p, c in edges)
-                if not has_child:
-                    roots.add(r)
             shape = 'box3d' if rank in roots else 'box'
             lines.append(f'    {node_name} [label="{label}", fillcolor="{color}", shape={shape}];')
 
