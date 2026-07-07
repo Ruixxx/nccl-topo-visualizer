@@ -10,7 +10,7 @@ Given an NCCL-TEST log (single-node or multi-node), this tool produces three kin
 |---|---|
 | **Physical topology** | Per-node hardware layout: CPU sockets, PCIe switches, GPUs (with rank numbers), NVSwitch, NIC. Shows NVL/PCI/SYS link bandwidth. |
 | **Ring topology** | Every ring channel reconstructed into a full cycle, with each rank labeled as `hostname:GPUx`. Edges colored green (P2P, intra-node) or red (RDMA, inter-node). |
-| **Tree topology** | Each distinct double-tree (Tree0 = uplink, Tree1 = cross-node) drawn separately. Root nodes use `box3d` shape. Same P2P/RDMA coloring. |
+| **Tree topology** | Each NCCL tree (Tree 0/1/2/3) drawn separately — double-tree 0 and double-tree 1, each replicated across channels. Root nodes use `box3d` shape. Same P2P/RDMA coloring. |
 
 ## Prerequisites
 
@@ -114,16 +114,21 @@ The tool follows `next` pointers to reconstruct the full ring cycle.
 
 ### Tree Topology
 
-Double-tree algorithm entries per channel:
+NCCL builds a double-tree (two independent binary trees) per channel for collectives like allreduce. Each rank logs its tree entry per channel:
 ```
 Trees [0] 1/8/-1->0->-1 [1] 1/8/-1->0->-1 [2] 1/-1/-1->0->8 [3] 1/-1/-1->0->8
 ```
-Format: `[channel] up0/up1/up2->self->down0/down1/down2`
+Format: `[channel] down0/down1/down2->self->up`
 
-- **Tree 0**: built from `up[0]` (parent) and `down[0]` (child) — the primary uplink tree
-- **Tree 1**: built from `up[1]` (parent) — the secondary/cross-node tree
+This mirrors NCCL's `struct ncclTree { int up; int down[3]; }` (see `src/include/device.h`):
+- `up`: single parent rank (`-1` if root)
+- `down[0..2]`: up to 3 child ranks (`-1` if none)
 
-Channels with identical tree structures are grouped together (e.g., `Ch0-15 Tree0` means channels 0–15 share the same tree).
+With `nChannels=2`, the four slots `[0][1][2][3]` map to `Tree 0/1/2/3`:
+- **Tree 0/1**: double-tree 0, channel 0 and 1 (topologically identical, different channels)
+- **Tree 2/3**: double-tree 1, channel 0 and 1 (topologically identical, different channels)
+
+Each tree is drawn as a separate subgraph labeled `Tree 0`, `Tree 1`, `Tree 2`, `Tree 3`. Root nodes (where `up == -1`) use the `box3d` shape. Edges flow parent → child: `(up → self)` and `(self → down[i])`.
 
 ### Connection Type
 
