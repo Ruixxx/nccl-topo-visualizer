@@ -593,7 +593,7 @@ def generate_physical_topo_dot(parser, hostname, topo_nodes, output_path):
             color = '#FFD700'
             shape = 'box'
         elif node.node_type == 'NVS':
-            label = f"NVSwitch\\n{node.node_id}\\nNVL 164.8 GB/s"
+            label = f"NVSwitch\\n{node.node_id}\\nNVL {node.bandwidth} GB/s"
             color = '#DDA0DD'
             shape = 'diamond'
         else:
@@ -629,7 +629,13 @@ def generate_physical_topo_dot(parser, hostname, topo_nodes, output_path):
     if len(cpu_nodes) >= 2:
         cpu0_name = make_node_name(cpu_nodes[0])
         cpu1_name = make_node_name(cpu_nodes[1])
-        lines.append(f'  {cpu0_name} -> {cpu1_name} [label="SYS/UPI 22.0", style=dashed, color=gray, constraint=false];')
+        # UPI 带宽从 SYS 链接的子节点获取（CPU/0-1 作为 CPU/0-0 的 SYS 子节点）
+        upi_bw = ''
+        for child in cpu_nodes[0].children:
+            if child.link_type == 'SYS' and child.node_type == 'CPU':
+                upi_bw = child.bandwidth
+                break
+        lines.append(f'  {cpu0_name} -> {cpu1_name} [label="SYS/UPI {upi_bw}", style=dashed, color=gray, constraint=false];')
 
     lines.append("}")
 
