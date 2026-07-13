@@ -145,25 +145,44 @@ class NCCLLogParser:
 
     @staticmethod
     def _bdf_to_topo_id(bdf):
-        """Convert BDF '0000:0f:00' to topology ID 'f000'."""
+        """Convert BDF 'domain:bus:dev.func' to topology ID.
+
+        NCCL topology node IDs use the format 'domain-busId' where busId is
+        the hex concatenation of domain, bus, device, function (zero-padded
+        bus, zero-padded dev, single hex func).
+
+        Examples:
+            H800:  '0000:0f:00' → 'f000'   (domain=0000 → stripped)
+            GB300: '0008:06:00' → '806000'  (domain=0008 → '8')
+                   '0018:06:00' → '1806000'
+        """
         parts = bdf.split(":")
         if len(parts) >= 3:
-            bus = parts[1]               # e.g., "0f"
+            domain = parts[0]             # e.g., "0000" or "0008"
+            bus = parts[1]                # e.g., "0f" or "06"
             dev_func = parts[2]           # e.g., "00"
             if "." in dev_func:
                 dev, func = dev_func.split(".")
             else:
                 dev, func = dev_func, "0"
-            raw = f"{bus}{dev}{int(func):x}"
+            raw = f"{domain}{bus}{dev}{int(func):x}"
             return format(int(raw, 16), "x")
         return bdf
 
     # ── Physical topology parsing ─────────────────────────────────────────
 
     def _parse_topology(self, lines):
-        """Parse the '=== System ===' block for each unique hostname."""
+        """Parse the '=== System ===' block for each unique hostname.
+
+        GB300 logs (and other multi-rank-per-node logs) interleave topology
+        lines from different ranks on the same host and occasionally from
+        different hosts mid-block. We track the originating rank of the System
+        block and only collect lines from that same rank, preventing duplicate
+        topology trees from sibling ranks on the same host.
+        """
         in_topo = False
         current_hostname = None
+        current_rank = None
         topo_lines = []
 
         for line in lines:
@@ -171,13 +190,21 @@ class NCCLLogParser:
                 m = re.match(r'(\S+):\d+:\d+\s+\[(\d+)\]\s+NCCL INFO === System', line)
                 if m:
                     hostname = m.group(1)
+                    rank = m.group(2)
                     if hostname not in self.physical_topo:
                         in_topo = True
                         current_hostname = hostname
+                        current_rank = rank
                         topo_lines = []
                     else:
                         in_topo = False
                         current_hostname = None
+                        current_rank = None
+                    continue
+                elif in_topo:
+                    m = re.match(r'(\S+):\d+:\d+\s+\[(\d+)\]\s+NCCL INFO\s(.+?)\s+\S+:\d+:\d+\s+\[(\d+)\]\s+NCCL INFO === System', line)
+                    if m and m.group(1) == current_hostname and m.group(2) == current_rank:
+                        topo_lines.append(m.group(3))
                     continue
             if in_topo:
                 if "======" in line:
@@ -185,12 +212,12 @@ class NCCLLogParser:
                         self.physical_topo[current_hostname] = self._build_topology_tree(topo_lines)
                     in_topo = False
                     current_hostname = None
+                    current_rank = None
                     topo_lines = []
                     continue
-                # Extract the NCCL INFO content
-                m = re.match(r'\S+:\d+:\d+\s+\[\d+\]\s+NCCL INFO\s(.*)', line)
-                if m:
-                    topo_lines.append(m.group(1))
+                m = re.match(r'(\S+):\d+:\d+\s+\[(\d+)\]\s+NCCL INFO\s(.*)', line)
+                if m and m.group(1) == current_hostname and m.group(2) == current_rank:
+                    topo_lines.append(m.group(3))
 
     def _build_topology_tree(self, lines):
         """Build a topology tree from indented log lines."""
@@ -232,7 +259,7 @@ class NCCLLogParser:
 
         m = re.match(
             r'(?:\+\s+(\w+)\[([\d.]+)\]\s+-\s+)?'
-            r'(\w+)/(\S+)'
+            r'(\w+)/([^\s(]+)'
             r'(?:\s+\(([^)]+)\))?',
             stripped
         )
