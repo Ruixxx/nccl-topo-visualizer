@@ -399,26 +399,38 @@ class NCCLLogParser:
     # ── NIC parsing ───────────────────────────────────────────────────────
 
     def _parse_nics(self, lines):
-        pattern = re.compile(
+        # Match NET/IB (H800: [0]mlx5_0:1/RoCE) and NET/Socket (GB300: [0]enP5p9s0:192.168.0.104<0)
+        # Also handle NET/IB [RO] fallback (GB300: [RO]; OOB enP5p9s0:192.168.0.104<0)
+        ib_pattern = re.compile(
             r'(\S+):\d+:\d+\s+\[\d+\]\s+NCCL INFO NET/IB\s+:\s+Using\s+\[\d+\](\S+)'
         )
+        socket_pattern = re.compile(
+            r'(\S+):\d+:\d+\s+\[\d+\]\s+NCCL INFO NET/Socket\s+:\s+Using\s+\[\d+\](\S+)'
+        )
         for line in lines:
-            m = pattern.search(line)
-            if m:
-                hostname = m.group(1)
-                nic_name = m.group(2)
-                if hostname not in self.nic_info:
-                    self.nic_info[hostname] = nic_name
+            for pattern in (ib_pattern, socket_pattern):
+                m = pattern.search(line)
+                if m:
+                    hostname = m.group(1)
+                    nic_name = m.group(2)
+                    if hostname not in self.nic_info:
+                        self.nic_info[hostname] = nic_name
 
     # ── GPU map ───────────────────────────────────────────────────────────
 
     def _build_gpu_map(self):
-        """Map hostname + full topo node ID -> rank for physical topology labeling."""
+        """Map hostname + full topo node ID -> rank for physical topology labeling.
+
+        Topology node IDs for GPUs use format '{domain}-{busId}' (e.g., '0-806000').
+        The same GPU can appear under multiple CPU domains in the topology tree
+        (e.g., GPU/0-806000 and GPU/1-806000 on GB300). We map all possible
+        domain prefixes for each rank's topo_id.
+        """
         for rank, info in self.ranks.items():
             if info.hostname not in self.topo_gpu_map:
                 self.topo_gpu_map[info.hostname] = {}
-            # Topology node IDs use format "0-f000" (domain-busId), topo_id is "f000"
-            self.topo_gpu_map[info.hostname][f"0-{info.topo_id}"] = rank
+            for domain in range(16):
+                self.topo_gpu_map[info.hostname][f"{domain}-{info.topo_id}"] = rank
 
     # ── Reconstruction ────────────────────────────────────────────────────
 
@@ -564,7 +576,7 @@ def generate_physical_topo_dot(parser, hostname, topo_nodes, output_path):
     defined_nodes = set()
 
     def make_node_name(node):
-        return node.node_id.replace('/', '_').replace('-', '_')
+        return re.sub(r'[^a-zA-Z0-9_]', '_', node.node_id.replace('/', '_').replace('-', '_'))
 
     def add_node(node, effective_parent=None, override_link=None):
         skip_types = ('DEV', 'NET', 'GIN', 'RMA')
