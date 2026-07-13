@@ -518,6 +518,8 @@ def _parse_rdma_info(via):
 
 def _conn_label(conn, parser=None):
     """Generate edge label for a connection."""
+    if 'MNNVL' in conn.via:
+        return 'MNNVL'
     if 'P2P' in conn.via:
         return 'P2P'
     elif 'NET' in conn.via or 'IB' in conn.via or 'GDRDMA' in conn.via:
@@ -539,8 +541,10 @@ def _conn_label(conn, parser=None):
 
 def _conn_color(conn):
     """Edge color based on connection type."""
+    if 'MNNVL' in conn.via:
+        return '#1f77b4'  # blue (inter-node NVLink)
     if 'P2P' in conn.via:
-        return '#2ca02c'  # green
+        return '#2ca02c'  # green (intra-node P2P)
     elif 'NET' in conn.via or 'IB' in conn.via or 'GDRDMA' in conn.via:
         return '#d62728'  # red
     return '#666666'
@@ -723,7 +727,6 @@ def generate_rings_dot(parser, output_path):
                 label = _conn_label(conn, parser)
                 color = _conn_color(conn)
             else:
-                # Same node → P2P, different node → RDMA
                 if ri_src.hostname == ri_dst.hostname:
                     label = 'P2P'
                     color = '#2ca02c'
@@ -741,8 +744,10 @@ def generate_rings_dot(parser, output_path):
     lines.append('    label="Legend";')
     lines.append('    style=dashed;')
     lines.append('    legend_p2p [label="P2P (intra-node)", fillcolor="#FFFFFF", shape=box];')
+    lines.append('    legend_mnnvl [label="MNNVL (inter-node NVLink)", fillcolor="#FFFFFF", shape=box];')
     lines.append('    legend_rdma [label="RDMA (inter-node)", fillcolor="#FFFFFF", shape=box];')
-    lines.append('    legend_p2p -> legend_rdma [label="P2P", color="#2ca02c"];')
+    lines.append('    legend_p2p -> legend_mnnvl [label="P2P", color="#2ca02c"];')
+    lines.append('    legend_mnnvl -> legend_rdma [label="MNNVL", color="#1f77b4"];')
     lines.append('    legend_rdma -> legend_p2p [label="RDMA", color="#d62728"];')
     lines.append('  }')
 
@@ -828,7 +833,8 @@ def generate_trees_dot(parser, output_path):
     lines.append('    legend_root [label="Root (box3d)", fillcolor="#FFFFFF", shape=box3d];')
     lines.append('    legend_node [label="Node", fillcolor="#FFFFFF", shape=box];')
     lines.append('    legend_root -> legend_node [label="P2P", color="#2ca02c"];')
-    lines.append('    legend_node -> legend_root [label="RDMA", color="#d62728"];')
+    lines.append('    legend_node -> legend_root [label="MNNVL", color="#1f77b4"];')
+    lines.append('    legend_root -> legend_node [label="RDMA", color="#d62728", style=dashed];')
     lines.append('  }')
 
     lines.append('}')
@@ -905,14 +911,22 @@ def print_summary(parser):
             ri_p = parser.ranks.get(parent)
             ri_c = parser.ranks.get(child)
             if ri_p and ri_c:
-                p2p = 'P2P' if ri_p.hostname == ri_c.hostname else 'RDMA'
-                print(f"    {parent}({ri_p.hostname}:GPU{ri_p.device}) → {child}({ri_c.hostname}:GPU{ri_c.device}) [{p2p}]")
+                if ri_p.hostname == ri_c.hostname:
+                    link_type = 'P2P'
+                else:
+                    conn = parser.connections.get((parent, child))
+                    if conn and 'MNNVL' in conn.via:
+                        link_type = 'MNNVL'
+                    else:
+                        link_type = 'RDMA'
+                print(f"    {parent}({ri_p.hostname}:GPU{ri_p.device}) → {child}({ri_c.hostname}:GPU{ri_c.device}) [{link_type}]")
     print()
 
     # Connection summary
-    p2p_conns = [(k, v) for k, v in parser.connections.items() if 'P2P' in v.via]
-    rdma_conns = [(k, v) for k, v in parser.connections.items() if 'P2P' not in v.via]
-    print(f"Connections: {len(parser.connections)} total ({len(p2p_conns)} P2P, {len(rdma_conns)} RDMA)")
+    mnnvl_conns = [(k, v) for k, v in parser.connections.items() if 'MNNVL' in v.via]
+    p2p_conns = [(k, v) for k, v in parser.connections.items() if 'P2P' in v.via and 'MNNVL' not in v.via]
+    rdma_conns = [(k, v) for k, v in parser.connections.items() if 'P2P' not in v.via and 'MNNVL' not in v.via]
+    print(f"Connections: {len(parser.connections)} total ({len(p2p_conns)} P2P, {len(mnnvl_conns)} MNNVL, {len(rdma_conns)} RDMA)")
     if rdma_conns:
         print("  RDMA connections:")
         for (src, dst), conn in sorted(rdma_conns):
